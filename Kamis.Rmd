@@ -1,0 +1,306 @@
+---
+title: "Farming Project"
+output: html_notebook
+---
+
+# Import necessary packages
+
+```{r message=FALSE, warning=FALSE}
+library(readxl)
+library(tidyverse)
+library(zoo)
+library(forecast)
+library(lubridate)
+library(seasonal)
+```
+
+# Key Note:
+
+**This notebook aims to cover the following:**
+
+1. Load the Different Folders containing the different food categories (Maize,Beans,Wheat) that we would like to analyse.
+
+2. Merge the various datasets contained in the folders to have three main datasets
+
+3. Perform Data cleaning on the Data to prepare it for time series Analysis. 
+> Challenge: How to Adress the missing prices either retail or wholesale prices
+
+4. Visualize the different datasets to see what time series components are available in the data.
+
+5. Try grouping and summarizing different prices based on daily,monthly prices to observe the trends and seasonality in the food crops data.
+
+
+## Maize
+
+```{r}
+# Create a list of file names
+file_name = "Maize_"
+file_list = list()
+path <- "Maize/"
+
+for (i in 1:14) {
+  file_list[[i]]<-paste0(path,file_name,i,'.xls')
+}
+# Function to extract the data from a single file 
+extract_data <- function(file){
+  data <- read_xlsx(file)
+  return(data)
+}
+
+# Use map_df to extract data from multiple files in parallel
+
+Maize_df <- map_df(file_list,extract_data)
+dim(Maize_df)
+```
+
+
+### Inspecting the data
+
+- We anticipate the data to have duplicates during data importing from Kamis website
+- Also we need to sort the data with respect to the dates in order of recent dates
+
+```{r}
+# Check for duplicates 
+sum(duplicated(Maize_df))
+```
+```{r}
+# Drop the duplicates
+Miaze_df <- distinct(Maize_df)
+dim(Miaze_df)
+
+# Convert the Date column to a date data type
+Miaze_df %>% mutate(Date = as.Date(Date)) -> Miaze_df
+
+# Sort using the date column
+Miaze_df[order(Miaze_df$Date),] -> Maize_df
+```
+
+### Data Cleaning 
+
+- Drop irrelevant columns for the time series analysis
+- Converting the character to numeric columns
+- Fill missing values the columns `Retail` and `Wholesale` prices for the 
+
+```{r}
+# Retaining the essential columns 
+Maize_df  %>% select(Classification,Wholesale,Retail,County,Date) ->Final_data
+dim(Final_data)
+```
+
+```{r}
+Final_data%>% mutate(
+  Wholesale = as.numeric(gsub('/Kg','',Final_data$Wholesale)),
+  Retail = as.numeric(gsub('/Kg','',Final_data$Retail)),
+  County = as.factor(County),
+  Classification=as.factor(Classification))->Final_data
+
+dim(Final_data)
+```
+
+
+
+
+```{r}
+summary(Final_data)
+```
+Something worth investigating is why some of the prices are as low as 0.01 and high as 7k and 9k could probably be created during data collection. Let's investigate prices less than the first quartile to see whether we should retain them later for modelling.
+
+First we will remove price for the wholesale and retail that are below 10 and above 200. Based on the research from various verified government sources the prices can not logically exceed  below and above the given range.
+**Note:**
+>
+- If applied the filter function for the above logic in both columns we experience alot of data loss this contributed by the high number of missing values.
+- A better way is to filter out the two price columns separate this helps retaining as much data as possible.Check summary statistics below
+
+```{r}
+Final_data %>% filter(Wholesale >10 & Wholesale <100 ) %>% select(-Retail) %>% summary()
+print('Data Dimension on filtering')
+Final_data %>% filter(Wholesale >10 & Wholesale <100 ) %>% select(-Retail) %>% dim()
+```
+
+
+
+```{r}
+Final_data %>% filter(Retail >10 & Retail < 100) %>% select(-Wholesale) %>% summary() #%>% head()
+print('Data Dimension on filtering')
+Final_data %>% filter(Retail >10 & Retail < 100) %>% select(-Wholesale) %>% dim() #%>% head()
+
+```
+
+```{r}
+# Filtering the two have two separate datasets
+Final_data %>% filter(Wholesale >10 & Wholesale < 100 , Classification=="White Maize") %>% select(-Retail)%>% filter(Date > as.Date("2021-01-01"))-> Wholesale_data
+
+Final_data %>% filter( Retail >10 & Retail < 100 ) %>% select(-Wholesale)%>% filter(Date > as.Date("2021-01-01"))-> Retail_data
+
+```
+
+
+
+```{r}
+# What are the the no. of counties in the data
+nlevels(Wholesale_data$County)
+
+
+# How many observations are there for each county
+# What are different means for the various counties
+Wholesale_data %>% group_by(County,Date) %>% summarise(No.county =length(County),
+                                                  Mean_by_county =mean(Wholesale)) %>% arrange(desc(Date))
+
+Wholesale_data %>% group_by(County,Date) %>% summarise(No.county =length(County),
+                                                  Mean_by_county =mean(Wholesale), .groups = "drop_last") %>% arrange(desc(Date)) %>% filter(Date>= as.Date("2025-01-01") & Date< as.Date("2025-12-31") & (County=="Bungoma" | County== "Kakamega")) #%>% tail(400)
+
+
+
+```
+
+
+>
+Call it killing two birds with one stone 😂😂😂 We dropped the missing values in the data when applying the filter function. But introduced time series data irreguralities meaning we have some gaps in the data through time. 
+
+### WholeSale Prices
+
+* Since we have prices from different markets we are going to use the mean average of the prices in a day as the prices we would want to investigate.
+* Something that caught my attention is the missing data from 2014 which sounds a bit impractical so I ought to remove data below 2021 until I figure out  a better way to retrieve the missing data 
+
+
+```{r}
+Wholesale_data %>% group_by(Date) %>% summarise(Wholesale_mean = round(mean(Wholesale),2)) ->Mean_wholesale
+
+Mean_wholesale %>% head()
+```
+As mentioned above we need to fist address irregularities in the time series data and we will use the zoo package for that
+
+```{r}
+# Creating a zoo object
+Wholesale_zoo <-zoo(Mean_wholesale$Wholesale_mean,Mean_wholesale$Date)
+
+length(Wholesale_zoo)
+# Identifying the missing data
+full_dates <- seq(min(Mean_wholesale$Date),max(Mean_wholesale$Date),by= 'day')
+length(full_dates)
+
+# Merge with all dates, introducing NAs for missing dates
+z_full <- merge.zoo(Wholesale_zoo, zoo(, full_dates), all = TRUE)
+print(z_full)
+
+# Using Linear Interpolation to fill in missing values
+Wholesale_day_avg <- na.approx(z_full)
+
+# Plot the interpolated data
+autoplot(Wholesale_day_avg)
+
+# Check if the data is irregular
+is.regular(Wholesale_day_avg) 
+
+Wholesale_day_avg %>% tail()
+```
+#### Monthly seasonality
+From the plot it is evident linear interpolation does really work well with our data but we could smooth the  data .
+A different approach to this we could aggregate the data further into monthly prices for the wholesale data to see if the data can be smoother.
+
+```{r}
+Wholesale_month_avg <-aggregate(Wholesale_zoo,as.yearmon,mean)
+Wholesale_month_avg
+autoplot(Wholesale_month_avg)
+```
+
+### Check for Time series components
+```{r}
+Wholesale_ts <-as.ts(Wholesale_month_avg)
+autoplot(decompose(Wholesale_ts,type = 'multiplicative')) # classical decomposition
+autoplot(Wholesale_ts %>% seas(x11="")) + ggtitle("X11 decomposition")# X11 decomposition
+autoplot(Wholesale_ts,series = "Data")+
+autolayer(seasadj(Wholesale_ts %>% seas(x11="")),series = "Seasonally Adjusted") +
+autolayer(trendcycle(Wholesale_ts %>% seas(x11="")),series = "Trend cycle") +
+scale_colour_manual(values=c("gray","blue","red"), 
+breaks=c("Data","Seasonally Adjusted","Trend cycle"))
+```
+From decomposing the wholesale prices for maize using multiplicative decomposition which comes in handy when there is  fluctuations in the mean prices and its is not roughly constant in size over time:
+a) The is no specific Trend in the data
+b) Seasonality is present
+c) In the random data their is still some patterns visible in the data
+
+```{r}
+ggseasonplot(Wholesale_ts,year.labels = TRUE)+theme_bw()
+ggseasonplot(Wholesale_ts,polar = TRUE)+theme_bw()
+```
+
+```{r}
+ggsubseriesplot(Wholesale_ts)
+```
+
+
+
+```{r}
+ggtsdisplay(Wholesale_ts,lag.max = 52)
+```
+
+
+#### Weekly Seasonality
+
+```{r}
+Wholesale_week_avg <-aggregate(Wholesale_zoo,floor_date(index(Wholesale_zoo), "week"),mean)
+Wholesale_week_avg
+autoplot(Wholesale_week_avg)
+```
+
+
+
+
+```{r}
+Wholesale_ts2 <-as.ts(Wholesale_week_avg);Wholesale_ts2
+Wholesale_ts2 <- ts(Wholesale_ts2,frequency = 52,start = c(2021,21));Wholesale_ts2
+autoplot(decompose(Wholesale_ts2,type = 'multiplicative')) # classical decomposition
+#Wholesale_ts2 %>%  seas()
+
+```
+
+
+
+```{r}
+ggseasonplot(Wholesale_ts2,year.labels = TRUE,year.labels.left = T)+theme_bw()
+ggseasonplot(Wholesale_ts2,polar = TRUE)+theme_bw()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
