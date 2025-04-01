@@ -1,0 +1,346 @@
+---
+title: "Maize Analysis"
+author: "Nanyaemuny Savins"
+format: pdf
+editor: visual
+---
+
+## Load necessary packages
+
+```{r,message=FALSE,warning=FALSE}
+library(readxl)
+library(tidyverse)
+library(zoo)
+library(forecast)
+library(lubridate)
+library(seasonal)
+library(moments)
+```
+
+**This notebook aims to cover the following:**
+
+-   Load the Different Folders containing the wholesale and retail prices of *maize* from different markets in Kenya
+
+-   Perform Data cleaning on the Data while ensuring data Integrity in the data
+
+-   Visualize the different sales prices from different regions of Kenya
+
+-   Model a Time series on the data using ARIMA and ETS models to fit on the data and forecast the next 5 months of the data.
+
+## Import Data
+
+The structure of my data stored in a folder `Maize`
+
+![](images/clipboard-1657767075.png)
+
+We need to import the different files and merge them to one dataset `maize_df` . To achieve this we will use a for loop to loop through the different files and create a list containing the names in our directory *maize* . Afterwards use the `map_df` which takes in a file list and a function that extract data from each file and merges them
+
+```{r}
+# Create a list of file names
+file_name = "Maize_"
+file_list =list()
+path <- "Maize/"
+
+for (i in 1:14){
+  file_list[[i]] <- paste0(path,file_name,i,'.xls')
+}
+
+# Function to extract the data from a single file
+extract_data <- function(file){
+  data<- read_xlsx(file)
+  return(data)
+}
+
+# Use map_df to etract data from multiple files in parallel 
+
+Maize_df <- map_df(file_list,extract_data)
+
+dim(Maize_df) # check the dimensions of our data
+
+names(Maize_df) # check the columns in the data
+
+str(Maize_df) # Investigate the structure of the different columns
+
+```
+
+It works ! on to the next step as we can observe from the different columns we need to perform data cleaning on the different columns :
+
+1.  Convert the whole_sale prices and retail prices into numeric variables
+
+2.  Change the character columns to factor they can be helpful in case we would be interested in grouping our data later in the exploratory analysis
+
+3.  The Date column should be in date format `year-month-date`
+
+4.  Check for Duplicates in the data and handle them
+
+5.  Handle missing values in the data
+
+```{r}
+
+# step 1: Convert prices to numeric columns
+Maize_df %>%  mutate(Wholesale=as.numeric(gsub('/Kg','',Wholesale)),
+                     Retail=as.numeric(gsub('/Kg','',Retail)))->cln1
+
+cln1 %>% select(Wholesale,Retail) %>% summary()
+
+```
+
+Perfect 👌🏿 something to note the prices are assumed to be per kg e.g `30.0 implies 1kg is sold at ksh30.` If we can just observe the min and max it's absurd for the prices to be that low or that high more on this later in the notebook.
+
+```{r}
+# step 2: Convert the Date to a date format
+cln1 %>% mutate(Date = as.Date(Date))-> cln2
+
+cln2 %>% select(Date) %>% summary()
+```
+
+Based on the Time frame in the data we have observations from `2005-02-01` to `2025-03-21`
+
+```{r}
+# step 3: Convert characters columns to factors
+cln2 %>% select_if(is.character)
+cln2 %>% mutate_if(is.character,as.factor)-> cln3
+
+```
+
+```{r}
+#step 4: Check for Duplicates
+sum(duplicated(cln3))
+cln3[duplicated(cln3),]
+# Drop the duplicates
+cln3 %>% distinct()-> cln4
+
+# Confirm no duplicates in the data
+sum(duplicated(cln4))
+
+# Check the data dimension
+cln4 %>% dim()
+```
+
+```{r}
+# Step 5: Handling missing values
+colMeans(is.na(cln4)*100)
+
+```
+
+-   `Supply volumes` has the highest number of missing values with more than 39% of the data containing missing values followed by `Retail` 30% , `Wholesale` 11% and `County` less than 1%.
+
+To get a better understanding of the missing values in the data we will look at each column individually
+
+### Wholesale prices
+
+We want to *dive deeper* and see how the whole sale prices is distributed over time.
+
+Note
+
+:   We will set the wholesales prices per kg not to be less than 30 and above 100. This values I choose them subjectively based on my knowledge and research of maize prices from different trusted sources.
+
+```{r}
+# Investigate wholesale prices
+cln4 %>% select(Wholesale) %>% summary() #%>% filter(Wholesale == )
+
+cln4 %>% filter(Wholesale>=30 & Wholesale<=100) %>% summary()
+
+cln4 %>% filter(Wholesale>=30 & Wholesale<=100) ->trial001
+
+ggplot(data = trial001,aes(Date,Wholesale))+geom_point()
+
+
+```
+
+From the scatter plot we can observe we have missing data between 2008 and 2020.This could be caused by few or no observation data collected for the missing years.
+
+-   We will truncate our data and emphasis our analysis on data from 2021
+
+-   Missing values for the wholesale prices were removed when filtering the wholesale prices
+
+```{r}
+trial001 %>% filter(Date > as.Date('2020-01-01')) ->trial002
+
+dim(trial002)
+```
+
+```{r}
+# Drop Irrelevant columns
+trial002 %>% summary()
+
+trial002 %>% select(-Commodity,-Grade,-Sex,-`Supply Volume`,-Retail)->trial003
+
+
+```
+
+### Exploratory Data Analysis
+
+```{r}
+trial003
+```
+
+For this section we aim to understand the following from the data:
+
+1.  Which counties have data recorded the most and the least wholesale prices?
+
+2.  Which markets have reported the highest and lowest maize prices ?
+
+3.  Is there significant difference in the prices for the difference classes of Dry Maize.?
+
+```{r}
+trial003 %>% group_by(County) %>% summarise(No.Obs=length(Wholesale)) %>% arrange(desc(No.Obs)) %>% head(10) ->pplot
+
+ggplot(pplot,aes(County,No.Obs)) + geom_col(aes(fill=County))+theme(legend.position = 'none')+ ggtitle("Top 10 counties observations")
+
+trial003 %>% group_by(County) %>% summarise(No.Obs=length(Wholesale)) %>% arrange(desc(No.Obs)) %>% tail(10) ->pplot
+
+ggplot(pplot,aes(County,No.Obs)) + geom_col(aes(fill=County))+theme(legend.position = 'none')+ ggtitle("Bottom 10 counties observations")
+```
+
+```{r}
+# What are different means for the wholesale prices for the various counties
+trial003 %>% group_by(County,Date) %>% summarise(No.county =length(County),Mean_by_county =mean(Wholesale)) %>% arrange(desc(Date))
+
+```
+
+### Time series Analysis
+
+-   We start of by Investigating skewness in the data this will come in handy when trying to identify the best method for aggregating the Maize prices.
+
+-   Since the prices from different markets are not so skewed we are going to use the mean average of the prices in a day as the prices we would want to analyse and later work on a model for the data.
+
+```{r}
+
+trial003 %>% group_by(Date) %>% summarise(Wholesale_mean = round(mean(Wholesale),2))->ts_data
+
+# Investigate skewness in the data
+ggplot(data = ts_data,aes(x=Wholesale_mean))+geom_density()
+skewness(ts_data$Wholesale_mean)
+
+```
+
+We need to convert our data to a time series data something worth investigating is whether the time series data is irregular. Missing observations for some days
+
+```{r}
+# Creating a zoo object
+Wholesale_zoo <-zoo(ts_data$Wholesale_mean,ts_data$Date)
+
+length(Wholesale_zoo)
+# Identifying the missing data
+full_dates <- seq(min(ts_data$Date),max(ts_data$Date),by= 'day')
+length(full_dates)
+
+# Merge with all dates, introducing NAs for missing dates
+z_full <- merge.zoo(Wholesale_zoo, zoo(, full_dates), all = TRUE)
+print(z_full)
+
+# Using Linear Interpolation to fill in missing values
+Wholesale_day_avg <- na.approx(z_full)
+
+# Plot the interpolated data
+autoplot(Wholesale_day_avg)
+
+# Check if the data is irregular
+is.regular(Wholesale_day_avg) 
+
+Wholesale_day_avg %>% tail()
+
+```
+
+### Smoothing Monthly
+
+From the plot it is evident linear interpolation does really work well with our data but we could smooth the data . A different approach to this we could aggregate the data further into monthly prices for the wholesale data to see if the data can be smoother.
+
+```{r}
+Wholesale_month_avg <-aggregate(Wholesale_zoo,as.yearmon,mean)
+Wholesale_month_avg
+autoplot(Wholesale_month_avg)
+
+```
+
+### Decomposition
+
+**Time series decomposition** is a technique used to break down a time series into its key components to better understand the underlying patterns. This is especially useful for analyzing trends, seasonality, and irregular variations in food price data.
+
+Types of time series decomposition we will investigate.
+
+-   **Classical decomposition**
+
+-   **STL decomposition**
+
+-   **X-11**
+
+| Method | Best For | Handles Changing Seasonality? | Handles Nonlinear Trends? |
+|------------------|------------------|------------------|------------------|
+| Classical decomposition | Simple, regular data |  ❌ No | ❌ No |
+| STL decomposition | Flexible seasonality, missing data | ✅ Yes | ✅ Yes |
+| X-11 | Economic data, business analysis | ✅ Yes | ✅ Yes |
+
+```{r}
+## Classical decomposition
+Wholesale_ts <-as.ts(Wholesale_month_avg)
+autoplot(decompose(Wholesale_ts,type = 'multiplicative')) 
+
+
+```
+
+From decomposing the wholesale prices for maize using multiplicative decomposition which comes in handy when there is fluctuations in the mean prices and its is not roughly constant in size over time:
+
+1.   The is no specific Trend in the data
+
+2.   Seasonality is present
+
+3.   In the random data their is still some patterns visible in the data
+
+```{r}
+# X13
+x11_decomposed <- seas(Wholesale_ts,x11 = "")
+
+autoplot(x11_decomposed)
+```
+
+```{r}
+# stl decomposition
+stl_decomposed <- stl(Wholesale_ts, s.window = "periodic")
+autoplot(stl_decomposed)
+
+```
+
+### Seasonality
+
+```{r}
+ggseasonplot(Wholesale_ts,year.labels = TRUE)+theme_bw()
+
+```
+
+###  
+
+```{r}
+ggsubseriesplot(Wholesale_ts)
+```
+
+```{r}
+ggtsdisplay(Wholesale_ts,lag.max = 52)
+```
+
+### Smoothing weekly
+
+```{r}
+Wholesale_week_avg <-aggregate(Wholesale_zoo,floor_date(index(Wholesale_zoo), "week"),mean)
+Wholesale_week_avg
+autoplot(Wholesale_week_avg)
+```
+
+#### Decomposition
+
+```{r}
+# Classical decomposition
+Wholesale_ts2 <-as.ts(Wholesale_week_avg);Wholesale_ts2
+Wholesale_ts2 <- ts(Wholesale_ts2,frequency = 52,start = c(2021,21));Wholesale_ts2
+autoplot(decompose(Wholesale_ts2,type = 'multiplicative'))
+```
+
+```{r}
+# STL decomposition
+stl(Wholesale_ts2,s.window = "periodic") %>% autoplot()
+```
+
+![](images/clipboard-2535415607.png)
+
+We will use the above strategy for Identifying an ARIMA model from Forecasting principle Rob J Hyndman
